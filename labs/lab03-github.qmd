@@ -1,0 +1,258 @@
+---
+title: "Lab 03 - EDA and Viz 1"
+subtitle: "JSC370 (Winter 2026)"
+date: "January 21, 2026"
+
+format:
+  html:
+    toc: true
+
+jupyter: python3
+
+execute:
+  enabled: true
+  echo: true
+  warning: false
+  message: false
+---
+
+
+# Learning Goals
+
+- Download [lab 3 here](https://github.com/JSC370/JSC370-2026/blob/main/labs/lab3/lab03-github.qmd)
+- Read in from github and get familiar with a meteorology dataset 
+- Plan out how to tackle the objective question
+- Step through the EDA "checklist" presented in the class slides
+- Make exploratory graphs and maps
+
+# Deliverables
+
+- Complete the code and summaries and upload your .qmd and rendered .html to Quercus
+
+# Lab Description
+
+We will work with similar meteorological data that was presented in lecture. Recall the dataset consists of weather station readings in the contiguous US. 
+
+**The objective of the lab is to find the weather station with the lowest elevation, find out where this location is (make a map), and make a time series plot of temperature at this station.**
+
+# Steps
+
+### 0. Load libraries
+
+Notes: 
+
+- import the necessary libraries
+- note setting pandas options for nicer display of the output
+- in the yaml above set enabled to true when you want the code to render
+
+```{python}
+import pandas as pd
+pd.set_option("display.float_format", "{:.2f}".format) 
+import numpy as np
+import matplotlib.pyplot as plt
+import geopandas as gpd
+import contextily as cx
+from IPython.display import display
+```
+
+
+### 1. Read in the data
+
+Connect to github and read in data with pandas.
+
+```{python}
+url = "https://raw.githubusercontent.com/JSC370/JSC370-2026/main/data/met_all_2025.gz"
+met = pd.read_csv(url, compression="gzip")  
+```
+
+### 2. Check the memory size, dataset dimensions, and the header. How many columns, rows are there?
+
+- fill in where there are ...
+
+```{python}
+display(met.memory_usage(deep=True).sum() / 1024**3)
+```
+
+```{python}
+display(met.shape[0], met.shape[1])
+```
+
+```{python}
+display(met.head())
+```
+
+Summary:
+
+- The dataset contains 5.38 million observations across 30 variables and represents high-frequency meteorological measurements.
+- It occupies about 2.46 GB of memory, includes station, time, location, and weather variables with some missing observations in selected variables.
+
+### 3. Look at data types of the variables in the dataset.
+
+```{python}
+met.info()
+```
+
+Summary:
+
+- The dataset contains 30 variables, including integer columns for station identifiers and time components, floating-point columns for geographic coordinates and meteorological measurements, and object columns for categorical descriptors such as wind type, sky condition, and measurement methods.
+- Overall, the data types are a mix of numeric (int64, float64) and categorical (object) variables, with several numeric variables accompanied by quality-control (QC) indicators.
+
+### 4. Take a closer look at the key variables (`temp` and `elev`). 
+
+- Are there missing data in these variables? If so, make sure they are coded correctly. 
+
+Both temp and elev contain no missing values, indicating complete coverage for these key variables in the dataset.
+
+
+```{python}
+key_vars = ['temp', 'elev']
+
+display(met[key_vars].isnull().sum())
+display((met[key_vars].isnull().sum() / len(met) * 100).round(2))
+```
+
+
+- Are there any unusual values that look suspicious?
+
+The temperature ranges from –40.0 to 999.9, where 999.9 is clearly not a physically plausible temperature and likely represents a placeholder or missing-value code in the dataset.
+Elevation ranges from –35 to 3680 meters, which is plausible (below sea level to high-altitude stations) and does not appear unusual.
+
+```{python}
+
+minT = met['temp'].min()
+maxT = met['temp'].max()
+
+minE = met['elev'].min()
+maxE = met['elev'].max()
+
+print(minT, maxT, minE, maxE)
+
+```
+
+Summary: 
+temp and elev have no missing values; however, the presence of a temperature value of 999.9 indicates a coded placeholder, while the elevation range is physically plausible.
+
+
+### 5. Check the data against an external data source and make any other adjustments.
+
+- Check that the range of elevations make sense. Google or ChatGPT is your friend here.
+- Fix any problems that arise in your checks.
+
+```{python}
+
+met.loc[met['temp'] == 999.9, 'temp'] = np.nan
+met[['temp']].describe().round(4)
+```
+
+Summary: 
+After removing the coded placeholder value (999.9), the remaining temperature values fall within a physically plausible range (–6.0 to 56.0 °C).
+
+
+```{python}
+cold_temps = met[met['temp'] <= -20]
+
+# display data here extract lat and lon and check google
+display(cold_temps[['USAFID', 'temp', 'lat', 'lon', 'year', 'month', 'day', 'hour']].drop_duplicates(subset=['USAFID']))
+```
+
+Summary: 
+Extremely low temperature values (≤ –20°C) were investigated using station location and timing information and were found to be implausible for the recorded regions and season. These observations were therefore removed.
+
+```{python}
+
+# Fix up data here, remove implausible values
+met = met[met['temp'] >- 20].copy()
+met['temp'].min()
+```
+
+
+
+## 6. Answer research questions
+
+Remember to keep the initial questions in mind. We want to pick out the weather station with minimum elevation and examine its temperature.
+
+Some ideas for steps: 
+1. subset the data for the weather station with minimum elevation
+2. look at histograms of temperature
+3. make a time series plot (need to create date variable)
+4. make a map to see where it is
+
+
+### 6a. Subset minimum elevation site
+
+```{python}
+# Subset data for the weather station with minimum elevation
+min_elev_station = met[met['elev'] == met['elev'].min()]
+display(min_elev_station)
+```
+
+### 6b. Histogram of temperature at minimum elevation site
+
+```{python}
+plt.hist(min_elev_station['temp'].dropna(), bins=50)
+plt.xlabel("Temperature (C)")
+plt.ylabel("Count")
+plt.show()
+```
+
+### 6c. Create date variable and time series plot
+
+- Look at the time series of temperature at this location. For this we will need to create a date-time variable for the x-axis.
+
+- Summarize any trends that you see in these time series plots.
+
+
+```{python}
+# Create a date variable for min_elev_station
+min_elev_station = min_elev_station.copy()
+min_elev_station['date'] = pd.to_datetime(
+    min_elev_station[['year', 'month', 'day', 'hour']]
+)
+
+# Sort by date
+min_elev_station = min_elev_station.sort_values('date')
+
+# Create line plot of temperature by date
+
+plt.plot(min_elev_station['date'], min_elev_station['temp'], linewidth = 0.5, alpha = 0.7)
+plt.xticks(rotation=45)
+plt.xlabel('Date')
+plt.ylabel("Temperature (C)")
+plt.show()
+```
+
+Summarize time series plot: 
+the temperature time series exhibits pronounced diurnal cycles and a modest upward trend from June to July, followed by sustained high temperatures later in the summer.
+
+### 6d. Where is the lowest weather station?
+
+```{python}
+station_location = min_elev_station[['USAFID','WBAN','lat','lon','elev']].drop_duplicates()
+
+lat = station_location['lat'].iloc[0]
+lon = station_location['lon'].iloc[0]
+elev = station_location['elev'].iloc[0]
+
+# make elev into GeoDataFrame for mapping
+gdf = gpd.GeoDataFrame(
+    {'elevation': [elev]},
+    geometry=gpd.points_from_xy([lon], [lat]),
+    crs='EPSG:4326'
+)
+
+# Convert to Web Mercator for basemap
+gdf = gdf.to_crs('EPSG:3857')
+
+# map
+fig, ax = plt.subplots(figsize=(10, 8))
+gdf.plot(ax=ax, color='red', markersize=300, marker='*', edgecolor='black', linewidth=2, zorder=5)
+cx.add_basemap(ax, source=cx.providers.OpenStreetMap.Mapnik)
+ax.set_xlabel('Longitude')
+ax.set_ylabel('Latitude')
+ax.set_title(f'Lowest Elevation Station (Elevation: {elev} m)')
+plt.show()
+```
+
+Summarize where the lowest elevation station is located.
+
+The lowest elevation weather station is located east of Los Angeles, near San Bernardino and north of Mexicali, in a low-lying desert region of southern California, with an elevation of –35 m.

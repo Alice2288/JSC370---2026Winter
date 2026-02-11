@@ -1,0 +1,266 @@
+---
+title: "Lab 04 - Data Visualization and GAMs"
+format:
+  html:
+    embed-resources: true
+jupyter: python3
+---
+
+```{python}
+#| label: setup
+#| message: false
+#| warning: false
+import pandas as pd
+import numpy as np
+from plotnine import *
+import warnings
+warnings.filterwarnings('ignore')
+import matplotlib.pyplot as plt
+from pygam import LinearGAM, s
+import statsmodels.api as sm
+from folium.plugins import MarkerCluster
+```
+
+# Learning Goals
+
+- Read in and prepare the meteorological dataset
+- Use `pd.merge()` to join two datasets
+- Deal with missings and impute data
+- Create several graphs with different `geoms` in `plotnine`
+- Create a facet graph
+- Conduct customizations of the graphs
+- Fit smooth regression models using `pygam` and compare to a linear regression model
+
+# Lab Description
+
+We will work with the meteorological data from last week's lab.
+
+**The objective of the lab is to examine the association between weather variables in the US, practice data visualization, and fit smooth regression models.**
+
+
+### 1. Read in the data
+
+First download and then read in with pandas:
+
+```{python}
+url = "https://raw.githubusercontent.com/JSC370/JSC370-2026/main/data/met_all_2025.gz"
+met = pd.read_csv(url, compression="gzip")
+```
+
+### 2. Prepare the data: some wrangling
+
+- From last week: remove temperatures less than -20C and change 999.9 to NaN.
+- Generate a date variable using `pd.to_datetime()`.
+- Using date filtering, keep the observations of the first week of July 2025.
+- Compute the mean by station of the variables `temp`, `rh`, `wind_sp`, `vis_dist`, `dew_point`, `lat`, `lon`, and `elev`.
+- Create a region variable for NW, SW, NE, SE based on lon = -98.00 and lat = 39.71 degrees.
+- Create a categorical variable for elevation (low: < 252m, high: >= 252m)
+
+```{python}
+# Replace 999.9 with NaN and filter temps > -20
+met.loc[met['temp'] == 999.9, 'temp'] = np.nan
+met = met[met['temp'] > -20].copy()
+
+# Create date variable
+met['date'] = pd.to_datetime(
+    met[['year', 'month', 'day', 'hour']])
+
+# Create region variable using np.select
+met['region'] = (
+    np.select(
+        [
+            (met['lon'] < -98) & (met['lat'] >= 39.71),
+            (met['lon'] >= -98) & (met['lat'] >= 39.71),
+            (met['lon'] < -98) & (met['lat'] < 39.71),
+        ],
+        ['NW', 'NE', 'SW'],
+        default='SE'
+    )
+)
+
+# Create elevation category
+met['elev_high_low'] = np.select(
+    [met['elev'] >= 252],
+    ['high'],
+    default='low'
+)
+
+display(met.head())
+```
+
+
+
+### 3. Use `geom_violin` to examine `dew_point` for low and high elevations by region
+
+Use `geom_violin` and subset the data to the first two weeks in July.
+
+- Subset to the first two weeks in July
+- Use facets
+- Summarize below
+
+```{python}
+# Subset to first two weeks of July
+met_july = met[(met['date'] >= '2025-07-01') & (met['date'] < '2025-07-15')].copy()
+
+# Create violin plot with facets
+(ggplot(met_july,
+        aes(x='elev_high_low', y='dew_point', fill='elev_high_low')) +
+  geom_violin() +
+  facet_wrap('~region') +
+  labs(x='Elevation Category', y='Dew Point Temperature',
+       title='Dew Point by Elevation and Region (July 1-14)') +
+  theme_minimal())
+
+```
+Summary:
+Dew point values vary mainly by region, with NE and SE showing higher and more consistent humidity than NW and SW. Across most regions, low-elevation stations have slightly higher median dew points than high-elevation stations. The NW and SW regions also show greater variability, especially at high elevations. Overall, regional differences appear stronger than elevation differences.
+
+
+### 4. Use `geom_bar` to create barplots of the proportion of weather stations by elevation category colored by region
+
+- Use the subset data from \#3, the first two weeks of July
+- Create nice labels on axes and add a title
+- Try a second plot with counts and `dodge` positioning
+- Summarize below
+
+```{python}
+# Proportion barplot (position='fill')
+(ggplot(met_july,
+        aes(x='elev_high_low', fill='region')) +
+  geom_bar(position='fill') +
+  scale_fill_brewer(type='qual', palette='Set2') +
+  labs(x='Elevation Category', y='Proportion of Stations',
+       title='Proportion of Weather Stations by Elevation and Region') +
+  theme_minimal())
+```
+
+```{python}
+# Count barplot with dodge positioning
+(ggplot(met_july,
+        aes(x='elev_high_low', fill='region')) +
+  geom_bar(position='dodge') +
+  scale_fill_brewer(type='qual', palette='Set2') +
+  labs(x='Elevation Category', y='Number of Stations',
+       title='Weather Stations by Elevation and Region') +
+  theme_minimal())
+
+```
+Summary:
+Low-elevation stations are dominated by the SE region, while high-elevation stations are more evenly distributed across regions. The proportion plot shows that SE contributes the largest share of low-elevation stations, whereas NE, NW, SE, and SW have more similar proportions at high elevation. The count plot confirms that SE has substantially more low-elevation stations than other regions. Overall, both plots indicate an imbalance in station coverage by region at low elevations.
+
+### 5. Use `stat_summary` to examine mean dew point by region with standard deviation error bars
+
+- Use `stat_summary` with appropriate functions for mean and standard deviation
+- Add error bars using another layer of `stat_summary` with `geom = "errorbar"`
+- Use `coord_flip`
+- Add labels and a title
+- Summarize below
+
+```{python}
+# Use stat_summary with fun_y, fun_ymin, fun_ymax
+# Hint: fun_ymin=lambda x: np.mean(x) - np.std(x)
+
+(ggplot(met_july, aes(x='region', y='dew_point')) +
+  stat_summary(fun_y=np.mean,
+               fun_ymin=lambda x: np.mean(x) - np.std(x),
+               fun_ymax=lambda x: np.mean(x) + np.std(x),
+               geom='errorbar') +
+  coord_flip() +
+  labs(x='Region', y='Dew Point Temperature',
+       title='Mean and standard deviation dew point temperature by geographic region') +  
+  theme_minimal() +
+  theme(plot_title=element_text(size=12)))
+```
+Summary:
+Mean dew point temperatures are highest in the SE region, followed by NE. The NW and SW regions have lower mean dew points, indicating drier conditions. The error bars show that SW and NW have larger variability than the eastern regions. Overall, humidity levels differ substantially by region.
+
+
+
+### 6. Smooth Regression with GAMs
+
+Let's practice running regression models with smooth functions on X. We use the `statsmodels` OLS for linear models and `pygam` package and `LinearGAM` function to do this.
+
+- Use the subsetted data. First remove NaN before fitting
+- Fit both a linear model with `sm.OLS` and a spline model (use `LinearGAM()` with `s()` for a smooth term on wind_sp and temp).
+- For the spline model try `n_splines` = 20
+- Summarize and plot the results from the models.
+
+```{python}
+# Data prep
+# Remove NaN values before fitting
+met_clean = met_july.dropna(subset=['wind_sp', 'temp', 'dew_point'])
+
+X = met_clean[['wind_sp', 'temp']].values
+y = met_clean['dew_point'].values
+```
+- Now fit linear model with sm.OLS
+
+```{python}
+# Don't forget to add a constant
+X_const = sm.add_constant(X)
+
+linear_mod = sm.OLS(y, X_const).fit()
+print("Linear Model:")
+print(linear_mod.summary())
+```
+Summary:
+
+- Report adjusted R2
+- Are the beta coefficients for wind speed and temperature significant?
+
+The adjusted R² of the linear model is 0.115, indicating that wind speed and temperature together explain about 11.5% of the variation in dew point. Both the wind speed and temperature coefficients are statistically significant (p < 0.001). Wind speed has a negative effect on dew point, while temperature has a positive effect.
+
+```{python}
+# GAM spline model
+# Use LinearGAM with s() for smooth terms
+# s(0) refers to first column, s(1) to second column
+
+gam_mod = LinearGAM(
+    s(0, n_splines=20) +
+    s(1, n_splines=20)).fit(X, y)
+print("\nSmooth Spline Model:")
+print(gam_mod.summary())
+```
+
+Summary:
+
+- Report pseudo R2, how does it compare to the linear model R2?
+- What are the EDoF for wind speed and temp?
+- Are the smooths for wind speed and temperature significant?
+
+The GAM has a pseudo R² of 0.2868, which is substantially higher than the linear model’s adjusted R² of 0.115, indicating a much better fit. The effective degrees of freedom are 13.5 for wind speed and 16.9 for temperature, suggesting both relationships are strongly nonlinear. The smooth terms for wind speed and temperature are highly significant (p ≈ 0). Overall, this supports the presence of important nonlinear effects not captured by the linear model.
+
+```{python}
+#| fig-align: center
+# Plot partial dependence curves for each predictor
+
+# define the figure size
+fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+
+# define the variables and colors
+spec = [
+    (0, 0, "Wind Speed",  "blue", "Effect of Wind Speed"),
+    (1, 1, "Temperature", "red",  "Effect of Temperature"),
+]
+
+# loop over smooth variables
+for ax, (term, xcol, xlabel, color, title) in zip(axes, spec):
+    XX = gam_mod.generate_X_grid(term=term)
+    x = XX[:, xcol]
+    pd_effect = gam_mod.partial_dependence(term=term, X=XX)
+    _, ci = gam_mod.partial_dependence(term=term, X=XX, width=0.95)
+
+    ax.plot(x, pd_effect, color=color, lw=2)
+    ax.plot(x, ci, color=color, ls="--", lw=1)
+    ax.set(xlabel=xlabel, ylabel="Partial Effect on Dew Point", title=title)
+
+plt.tight_layout()
+plt.show()
+```
+Summary:
+
+- Visual inspection of the fitted curves
+- Does the smooth term capture meaningful non-linearity?
+
+The partial dependence curve for wind speed shows a nonlinear pattern, with dew point decreasing at low wind speeds, increasing at moderate speeds, and then leveling off at higher speeds. The temperature curve exhibits strong nonlinearity, rising sharply at low-to-moderate temperatures and flattening or slightly declining at higher temperatures. These curved shapes deviate from straight lines, indicating that linear effects would be insufficient. Therefore, the smooth terms clearly capture meaningful nonlinear relationships for both predictors.
+
