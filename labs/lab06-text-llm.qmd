@@ -23,6 +23,8 @@ For this lab we will be working with the medical record transcriptions from http
 
 2. Add link to your github repo in your html.
 
+https://github.com/Alice2288/JSC370---2026Winter
+
 ### Setup packages
 
 You should have the following packages installed: `pandas`, `numpy`, `plotnine`, `nltk`, `wordcloud`, and `scikit-learn`.
