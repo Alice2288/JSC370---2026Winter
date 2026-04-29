@@ -8,7 +8,7 @@
 
 ## What this is
 
-The project asks whether you can predict how audiences rate a movie
+The project asks whether we can predict how audiences rate a movie
 just from its public TMDb metadata. Things like runtime, genre,
 release year, language, vote count, and popularity. It builds on my
 midterm exploratory analysis. The midterm found that no single
@@ -54,10 +54,7 @@ final-project/
 └── README.md
 ```
 
-The project is **pure Quarto + Python**. There are no standalone `.py`
-or `.ipynb` files; every step lives inside a `.qmd` document.
-
-## How to run (the only commands you need)
+## How to run
 
 From the `final-project/` directory:
 
