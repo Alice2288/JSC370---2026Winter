@@ -1,0 +1,790 @@
+---
+title: "Predicting Movie Ratings — Analysis Notebook"
+subtitle: "JSC370 Final Project, Winter 2026"
+author: "Yujun Lu"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: show
+    code-tools: true
+    embed-resources: false
+    theme: cosmo
+execute:
+  warning: false
+  message: false
+  echo: true
+---
+
+This notebook contains the full analysis: it loads the TMDb dataset
+gathered by `collect_data.qmd`, engineers features, fits the regression
+and classification models, and writes out every figure used by the PDF
+report and the website.
+
+Once `data/movies_raw.csv` is in place, `quarto render analysis.qmd`
+regenerates static figures into `figures/`, interactive Plotly figures
+into `docs/`, and metric CSV tables into `report/tables/`.
+
+## Setup
+
+```{python}
+#| label: imports
+import json
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+import plotly.express as px
+import plotly.graph_objects as go
+
+from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
+from sklearn.linear_model import LinearRegression, LogisticRegression
+from sklearn.metrics import (
+    r2_score, mean_squared_error, mean_absolute_error,
+    accuracy_score, roc_auc_score, confusion_matrix, roc_curve,
+)
+from sklearn.model_selection import train_test_split
+
+try:
+    from xgboost import XGBRegressor, XGBClassifier
+    HAS_XGB = True
+except ImportError:
+    HAS_XGB = False
+
+PROJECT_ROOT = Path.cwd()
+FIGURES_DIR = PROJECT_ROOT / "figures"
+DOCS_DIR = PROJECT_ROOT / "docs"
+TABLES_DIR = PROJECT_ROOT / "report" / "tables"
+for d in (FIGURES_DIR, DOCS_DIR, TABLES_DIR):
+    d.mkdir(parents=True, exist_ok=True)
+
+RANDOM_STATE = 370
+HIGH_RATING_THRESHOLD = 7.0
+PLOTLY_TEMPLATE = "plotly_white"
+PALETTE = ["#4C72B0", "#DD8452", "#55A868", "#C44E52", "#8172B3",
+           "#937860", "#DA8BC3", "#8C8C8C", "#CCB974", "#64B5CD"]
+
+pd.set_option("display.max_columns", 50)
+pd.set_option("display.width", 120)
+sns.set_theme(style="whitegrid", context="notebook")
+```
+
+## Cleaning and feature engineering
+
+```{python}
+#| label: feature-engineering
+TOP_GENRES = [
+    "Action", "Adventure", "Animation", "Comedy", "Crime", "Documentary",
+    "Drama", "Family", "Fantasy", "History", "Horror", "Music", "Mystery",
+    "Romance", "Science Fiction", "Thriller", "War", "Western",
+]
+
+
+def _safe_json_list(x):
+    if isinstance(x, list):
+        return x
+    if pd.isna(x):
+        return []
+    try:
+        v = json.loads(x)
+        return v if isinstance(v, list) else []
+    except (TypeError, ValueError):
+        return []
+
+
+def clean_raw(df):
+    df = df.copy()
+    df["release_date"] = pd.to_datetime(df["release_date"], errors="coerce")
+    df["release_year"] = df["release_date"].dt.year
+    df["release_month"] = df["release_date"].dt.month
+
+    numeric = ["popularity", "vote_average", "vote_count",
+               "budget", "revenue", "runtime"]
+    for c in numeric:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    for c in ["budget", "revenue", "runtime"]:
+        df[c] = df[c].replace(0, np.nan)
+    return df
+
+
+def engineer_features(df):
+    df = clean_raw(df)
+    df = df[(df["vote_count"] >= 30) & (df["vote_average"] > 0)].copy()
+
+    df["log_vote_count"] = np.log10(df["vote_count"])
+    df["log_popularity"] = np.log1p(df["popularity"])
+    df["log_budget"] = np.log10(df["budget"])
+    df["log_revenue"] = np.log10(df["revenue"])
+    df["has_budget"] = df["budget"].notna().astype(int)
+    df["has_revenue"] = df["revenue"].notna().astype(int)
+    df["roi"] = df["revenue"] / df["budget"]
+    df["log_roi"] = np.log1p(df["roi"])
+
+    genres = df["genres"].apply(_safe_json_list)
+    df["n_genres"] = genres.apply(len)
+    for g in TOP_GENRES:
+        col = "genre_" + g.lower().replace(" ", "_")
+        df[col] = genres.apply(lambda lst: int(g in lst))
+    df["primary_genre"] = genres.apply(lambda lst: lst[0] if lst else "Unknown")
+
+    df["is_english"] = (df["original_language"] == "en").astype(int)
+    df["decade"] = (df["release_year"] // 10 * 10).astype("Int64")
+
+    countries = df["production_countries"].apply(_safe_json_list)
+    df["n_countries"] = countries.apply(len)
+    df["is_us_production"] = countries.apply(lambda lst: int("US" in lst))
+
+    return df.dropna(subset=["vote_average"]).reset_index(drop=True)
+
+
+CORE_FEATURES = [
+    "log_vote_count", "log_popularity", "runtime",
+    "release_year", "release_month",
+    "n_genres", "n_countries",
+    "is_english", "is_us_production",
+    "production_companies_n", "spoken_languages_n",
+    "tagline_len", "overview_len",
+    "belongs_to_collection",
+    "has_budget", "has_revenue",
+] + ["genre_" + g.lower().replace(" ", "_") for g in TOP_GENRES]
+
+FINANCIAL_FEATURES = ["log_budget", "log_revenue", "log_roi"]
+
+
+def build_modelling_frame(df_features, include_financial=False):
+    cols = CORE_FEATURES + (FINANCIAL_FEATURES if include_financial else [])
+    cols = [c for c in cols if c in df_features.columns]
+    out = df_features[cols + ["vote_average", "movie_id", "title"]].copy()
+    if include_financial:
+        out = out.dropna(subset=FINANCIAL_FEATURES)
+    return out.reset_index(drop=True)
+```
+
+## Load and clean data
+
+```{python}
+#| label: load-data
+raw_path = PROJECT_ROOT / "data" / "movies_raw.csv"
+assert raw_path.exists(), "Run collect_data.qmd first."
+raw = pd.read_csv(raw_path)
+print("Raw shape:", raw.shape)
+raw.head(3)
+```
+
+```{python}
+#| label: engineer
+features_df = engineer_features(raw)
+print("After cleaning + feature engineering:", features_df.shape)
+features_df[["title", "vote_average", "vote_count", "popularity",
+             "runtime", "release_year", "primary_genre"]].head()
+```
+
+## Exploratory data analysis
+
+```{python}
+#| label: eda-tables
+summary_main = (features_df[["vote_average", "popularity", "vote_count",
+                             "runtime", "release_year"]]
+                .agg(["count", "mean", "median", "std", "min", "max"])
+                .round(2))
+summary_main
+```
+
+```{python}
+#| label: eda-financial
+financial = features_df.dropna(subset=["budget", "revenue"])
+summary_fin = (financial[["budget", "revenue"]]
+                .agg(["count", "mean", "median", "min", "max"])
+                .round(0))
+summary_fin
+```
+
+### Static EDA figures
+
+```{python}
+#| label: fig-rating-dist
+plt.figure(figsize=(7, 4))
+sns.histplot(features_df["vote_average"], bins=25,
+             color="#4C72B0", edgecolor="white")
+plt.xlabel("TMDb vote average")
+plt.ylabel("Number of movies")
+plt.title(f"Figure 1. Distribution of audience ratings (n = {len(features_df):,})")
+plt.tight_layout()
+plt.savefig(FIGURES_DIR / "fig_rating_dist.png", dpi=180)
+plt.show()
+```
+
+```{python}
+#| label: fig-corr
+cols = ["vote_average", "log_vote_count", "log_popularity", "runtime",
+        "release_year", "log_budget", "log_revenue"]
+cols = [c for c in cols if c in features_df.columns]
+plt.figure(figsize=(7, 5))
+sns.heatmap(features_df[cols].corr(), annot=True, cmap="coolwarm",
+            fmt=".2f", vmin=-1, vmax=1, square=True,
+            cbar_kws={"shrink": .8})
+plt.title("Figure 2. Correlations among numeric movie variables")
+plt.tight_layout()
+plt.savefig(FIGURES_DIR / "fig_corr.png", dpi=180)
+plt.show()
+```
+
+```{python}
+#| label: fig-genre-box
+top = features_df["primary_genre"].value_counts().head(8).index
+sub = features_df[features_df["primary_genre"].isin(top)]
+order = (sub.groupby("primary_genre")["vote_average"].median()
+            .sort_values(ascending=False).index)
+plt.figure(figsize=(8, 4.5))
+sns.boxplot(data=sub, x="primary_genre", y="vote_average",
+            order=order, hue="primary_genre", palette="Set2", legend=False)
+plt.xticks(rotation=25)
+plt.xlabel("Primary genre")
+plt.ylabel("Vote average")
+plt.title("Figure 3. Rating distribution by genre (top 8)")
+plt.tight_layout()
+plt.savefig(FIGURES_DIR / "fig_genre_box.png", dpi=180)
+plt.show()
+```
+
+## Modelling setup
+
+I model `vote_average` two ways: regression (predict the continuous
+score) and classification (predict whether a film is high-rated, with
+the threshold at 7.0). Both use a 60 / 20 / 20 train / validation / test
+split with `random_state=370`.
+
+```{python}
+#| label: model-frame
+model_df = build_modelling_frame(features_df, include_financial=False)
+print("Modelling frame:", model_df.shape)
+model_df["vote_average"].describe().round(2)
+```
+
+### Model containers and training helpers
+
+```{python}
+#| label: model-helpers
+@dataclass
+class RegressionResult:
+    name: str
+    model: Any
+    metrics: dict = field(default_factory=dict)
+    test_predictions: pd.DataFrame = field(default_factory=pd.DataFrame)
+    feature_importance: pd.DataFrame = field(default_factory=pd.DataFrame)
+
+
+@dataclass
+class ClassificationResult:
+    name: str
+    model: Any
+    metrics: dict = field(default_factory=dict)
+    test_proba: np.ndarray = field(default_factory=lambda: np.array([]))
+    test_y: np.ndarray = field(default_factory=lambda: np.array([]))
+    feature_importance: pd.DataFrame = field(default_factory=pd.DataFrame)
+
+
+def _split_xy(df, target="vote_average"):
+    drop = {target, "movie_id", "title", "is_high_rated"}
+    feature_cols = [c for c in df.columns if c not in drop]
+    return df[feature_cols].copy(), df[target].copy(), feature_cols
+
+
+def _split_three(X, y, stratify=None):
+    X_tv, X_te, y_tv, y_te = train_test_split(
+        X, y, test_size=0.20, random_state=RANDOM_STATE, stratify=stratify)
+    strat2 = y_tv if stratify is not None else None
+    X_tr, X_va, y_tr, y_va = train_test_split(
+        X_tv, y_tv, test_size=0.25, random_state=RANDOM_STATE, stratify=strat2)
+    return X_tr, X_va, X_te, y_tr, y_va, y_te
+
+
+def _reg_metrics(y_true, y_pred):
+    return {
+        "R2":   float(r2_score(y_true, y_pred)),
+        "RMSE": float(np.sqrt(mean_squared_error(y_true, y_pred))),
+        "MAE":  float(mean_absolute_error(y_true, y_pred)),
+    }
+
+
+def _clf_metrics(y_true, y_pred, y_proba):
+    return {
+        "Accuracy": float(accuracy_score(y_true, y_pred)),
+        "ROC_AUC":  float(roc_auc_score(y_true, y_proba)),
+        "Confusion": confusion_matrix(y_true, y_pred).tolist(),
+    }
+```
+
+### Regression: linear baseline, Random Forest, XGBoost
+
+```{python}
+#| label: train-regression
+def train_regression(df):
+    X, y, feat_cols = _split_xy(df)
+    X_tr, X_va, X_te, y_tr, y_va, y_te = _split_three(X, y)
+
+    out = {}
+
+    medians = X_tr.median(numeric_only=True)
+    lin = LinearRegression()
+    lin.fit(X_tr.fillna(medians), y_tr)
+    pred_te = lin.predict(X_te.fillna(medians))
+    out["linear"] = RegressionResult(
+        name="Linear Regression", model=lin,
+        metrics={
+            "train": _reg_metrics(y_tr, lin.predict(X_tr.fillna(medians))),
+            "val":   _reg_metrics(y_va, lin.predict(X_va.fillna(medians))),
+            "test":  _reg_metrics(y_te, pred_te),
+        },
+        test_predictions=pd.DataFrame({"y_true": y_te.values, "y_pred": pred_te}),
+    )
+
+    rf = RandomForestRegressor(
+        n_estimators=500, max_depth=None, min_samples_leaf=2,
+        n_jobs=-1, random_state=RANDOM_STATE,
+    )
+    rf.fit(X_tr.fillna(-1), y_tr)
+    pred_te_rf = rf.predict(X_te.fillna(-1))
+    fi_rf = (pd.DataFrame({"feature": feat_cols, "importance": rf.feature_importances_})
+             .sort_values("importance", ascending=False).reset_index(drop=True))
+    out["random_forest"] = RegressionResult(
+        name="Random Forest", model=rf,
+        metrics={
+            "train": _reg_metrics(y_tr, rf.predict(X_tr.fillna(-1))),
+            "val":   _reg_metrics(y_va, rf.predict(X_va.fillna(-1))),
+            "test":  _reg_metrics(y_te, pred_te_rf),
+        },
+        test_predictions=pd.DataFrame({"y_true": y_te.values, "y_pred": pred_te_rf}),
+        feature_importance=fi_rf,
+    )
+
+    if HAS_XGB:
+        xgb = XGBRegressor(
+            n_estimators=600, learning_rate=0.05, max_depth=5,
+            subsample=0.8, colsample_bytree=0.8, reg_lambda=1.0,
+            random_state=RANDOM_STATE, n_jobs=-1, tree_method="hist",
+        )
+        xgb.fit(X_tr, y_tr, eval_set=[(X_va, y_va)], verbose=False)
+        pred_te_xgb = xgb.predict(X_te)
+        fi_xgb = (pd.DataFrame({"feature": feat_cols, "importance": xgb.feature_importances_})
+                  .sort_values("importance", ascending=False).reset_index(drop=True))
+        out["xgboost"] = RegressionResult(
+            name="XGBoost", model=xgb,
+            metrics={
+                "train": _reg_metrics(y_tr, xgb.predict(X_tr)),
+                "val":   _reg_metrics(y_va, xgb.predict(X_va)),
+                "test":  _reg_metrics(y_te, pred_te_xgb),
+            },
+            test_predictions=pd.DataFrame({"y_true": y_te.values, "y_pred": pred_te_xgb}),
+            feature_importance=fi_xgb,
+        )
+
+    return out
+
+
+reg_results = train_regression(model_df)
+
+rows = []
+for k, r in reg_results.items():
+    for split, vals in r.metrics.items():
+        rows.append({"model": r.name, "split": split, **vals})
+reg_metrics = pd.DataFrame(rows).round(3)
+reg_metrics_test = (reg_metrics[reg_metrics["split"] == "test"]
+                    .set_index("model")[["R2", "RMSE", "MAE"]])
+reg_metrics_test
+```
+
+### Regression diagnostic figures
+
+```{python}
+#| label: fig-pred-vs-actual
+fig, axes = plt.subplots(1, len(reg_results),
+                         figsize=(5 * len(reg_results), 4.3),
+                         sharex=True, sharey=True)
+if len(reg_results) == 1:
+    axes = [axes]
+for ax, (_, res) in zip(axes, reg_results.items()):
+    d = res.test_predictions
+    ax.scatter(d["y_true"], d["y_pred"], alpha=.55, s=20, color="#4C72B0")
+    lim = [d["y_true"].min() - 0.2, d["y_true"].max() + 0.2]
+    ax.plot(lim, lim, "k--", lw=1)
+    ax.set_xlim(lim); ax.set_ylim(lim)
+    m = res.metrics["test"]
+    ax.set_title(f"{res.name}\n"
+                 f"R²={m['R2']:.2f}  RMSE={m['RMSE']:.2f}  MAE={m['MAE']:.2f}")
+    ax.set_xlabel("Actual rating"); ax.set_ylabel("Predicted rating")
+plt.suptitle("Figure 4. Predicted vs actual ratings on the test set")
+plt.tight_layout(rect=[0, 0, 1, 0.95])
+plt.savefig(FIGURES_DIR / "fig_pred_vs_actual.png", dpi=180)
+plt.show()
+```
+
+```{python}
+#| label: fig-feature-importance
+res = reg_results.get("xgboost") or reg_results["random_forest"]
+fi = res.feature_importance.head(15).iloc[::-1]
+plt.figure(figsize=(7, 5))
+plt.barh(fi["feature"], fi["importance"], color="#55A868")
+plt.xlabel("Relative importance")
+plt.title(f"Figure 5. Top 15 features — {res.name}")
+plt.tight_layout()
+plt.savefig(FIGURES_DIR / "fig_feature_importance.png", dpi=180)
+plt.show()
+```
+
+### Classification: high vs not high (≥ 7.0)
+
+```{python}
+#| label: train-classification
+def train_classification(df, threshold=HIGH_RATING_THRESHOLD):
+    df = df.copy()
+    df["is_high_rated"] = (df["vote_average"] >= threshold).astype(int)
+    X, _, feat_cols = _split_xy(df)
+    y = df["is_high_rated"]
+
+    X_tr, X_va, X_te, y_tr, y_va, y_te = _split_three(X, y, stratify=y)
+    out = {}
+
+    medians = X_tr.median(numeric_only=True)
+    log = LogisticRegression(max_iter=1000, n_jobs=-1)
+    log.fit(X_tr.fillna(medians), y_tr)
+    proba = log.predict_proba(X_te.fillna(medians))[:, 1]
+    pred = (proba >= 0.5).astype(int)
+    out["logistic"] = ClassificationResult(
+        name="Logistic Regression", model=log,
+        metrics={"test": _clf_metrics(y_te, pred, proba)},
+        test_proba=proba, test_y=y_te.values,
+    )
+
+    rf = RandomForestClassifier(
+        n_estimators=500, max_depth=None, min_samples_leaf=2,
+        n_jobs=-1, random_state=RANDOM_STATE, class_weight="balanced",
+    )
+    rf.fit(X_tr.fillna(-1), y_tr)
+    proba = rf.predict_proba(X_te.fillna(-1))[:, 1]
+    pred = (proba >= 0.5).astype(int)
+    fi_rf = (pd.DataFrame({"feature": feat_cols, "importance": rf.feature_importances_})
+             .sort_values("importance", ascending=False).reset_index(drop=True))
+    out["random_forest"] = ClassificationResult(
+        name="Random Forest", model=rf,
+        metrics={"test": _clf_metrics(y_te, pred, proba)},
+        test_proba=proba, test_y=y_te.values,
+        feature_importance=fi_rf,
+    )
+
+    if HAS_XGB:
+        pos = (y_tr == 1).sum()
+        neg = (y_tr == 0).sum()
+        spw = max(1.0, neg / max(pos, 1))
+        xgb = XGBClassifier(
+            n_estimators=600, learning_rate=0.05, max_depth=5,
+            subsample=0.8, colsample_bytree=0.8, reg_lambda=1.0,
+            scale_pos_weight=spw, random_state=RANDOM_STATE, n_jobs=-1,
+            tree_method="hist", eval_metric="logloss",
+        )
+        xgb.fit(X_tr, y_tr, eval_set=[(X_va, y_va)], verbose=False)
+        proba = xgb.predict_proba(X_te)[:, 1]
+        pred = (proba >= 0.5).astype(int)
+        fi_xgb = (pd.DataFrame({"feature": feat_cols, "importance": xgb.feature_importances_})
+                  .sort_values("importance", ascending=False).reset_index(drop=True))
+        out["xgboost"] = ClassificationResult(
+            name="XGBoost", model=xgb,
+            metrics={"test": _clf_metrics(y_te, pred, proba)},
+            test_proba=proba, test_y=y_te.values,
+            feature_importance=fi_xgb,
+        )
+
+    return out
+
+
+clf_results = train_classification(model_df, threshold=HIGH_RATING_THRESHOLD)
+
+rows = []
+for k, r in clf_results.items():
+    m = r.metrics["test"]
+    rows.append({"model": r.name,
+                 "Accuracy": m["Accuracy"],
+                 "ROC_AUC":  m["ROC_AUC"]})
+clf_metrics = pd.DataFrame(rows).round(3).set_index("model")
+print("Class balance (1 = rating ≥ {:.1f}):".format(HIGH_RATING_THRESHOLD))
+print((model_df["vote_average"] >= HIGH_RATING_THRESHOLD).value_counts())
+clf_metrics
+```
+
+```{python}
+#| label: fig-roc
+plt.figure(figsize=(6, 5))
+for _, res in clf_results.items():
+    fpr, tpr, _ = roc_curve(res.test_y, res.test_proba)
+    auc = res.metrics["test"]["ROC_AUC"]
+    plt.plot(fpr, tpr, label=f"{res.name} (AUC = {auc:.2f})")
+plt.plot([0, 1], [0, 1], "k--", lw=1, label="Chance")
+plt.xlabel("False positive rate")
+plt.ylabel("True positive rate")
+plt.title("Figure 6. ROC curves for high-rating classification")
+plt.legend(loc="lower right")
+plt.tight_layout()
+plt.savefig(FIGURES_DIR / "fig_roc.png", dpi=180)
+plt.show()
+```
+
+## Build interactive Plotly figures
+
+These HTML files land in `docs/` so the website can embed them.
+
+```{python}
+#| label: plotly-helpers
+def _save_html(fig, name):
+    fig.update_layout(template=PLOTLY_TEMPLATE)
+    fig.write_html(DOCS_DIR / name, include_plotlyjs="cdn", full_html=True)
+```
+
+```{python}
+#| label: plotly-rating-vs-votes
+top = features_df["primary_genre"].value_counts().head(8).index.tolist()
+sub = features_df[features_df["primary_genre"].isin(top)].copy()
+
+fig = go.Figure()
+for g, color in zip(top, PALETTE):
+    s = sub[sub["primary_genre"] == g]
+    fig.add_trace(go.Scatter(
+        x=s["log_vote_count"], y=s["vote_average"], mode="markers", name=g,
+        text=[f"{t} ({int(y or 0)})" for t, y in zip(s["title"], s["release_year"].fillna(0))],
+        customdata=np.column_stack([s["vote_count"], s["popularity"], s["runtime"].fillna(0)]),
+        hovertemplate=("<b>%{text}</b><br>rating: %{y:.2f}<br>"
+                       "votes: %{customdata[0]:,}<br>"
+                       "popularity: %{customdata[1]:.1f}<br>"
+                       "runtime: %{customdata[2]:.0f} min<extra></extra>"),
+        marker=dict(color=color, size=9, opacity=0.72,
+                    line=dict(width=0.5, color="white")),
+    ))
+
+buttons = [dict(label="All genres", method="update",
+                args=[{"visible": [True] * len(top)},
+                      {"title": "Rating vs log10(vote count) — all genres"}])]
+for i, g in enumerate(top):
+    buttons.append(dict(label=g, method="update",
+                        args=[{"visible": [j == i for j in range(len(top))]},
+                              {"title": f"Rating vs log10(vote count) — {g}"}]))
+
+fig.update_layout(
+    title=dict(text="Rating vs log10(vote count) — all genres",
+               x=0.5, xanchor="center", y=0.97, yanchor="top",
+               font=dict(size=16)),
+    xaxis_title="log10(vote count)",
+    yaxis=dict(title="Vote average", range=[2, 9.5]),
+    margin=dict(l=60, r=30, t=130, b=140),
+    legend=dict(orientation="h", y=-0.15, x=0.5, xanchor="center"),
+    updatemenus=[dict(type="dropdown", direction="down",
+                      x=0.78, y=1.10, xanchor="left", yanchor="top",
+                      showactive=True, buttons=buttons,
+                      bgcolor="#f1f5f9", bordercolor="#cbd5e1")],
+    annotations=[dict(x=0.78, y=1.16, xref="paper", yref="paper",
+                      text="<b>Filter by genre:</b>",
+                      showarrow=False, xanchor="left",
+                      font=dict(size=12, color="#475569"))],
+)
+_save_html(fig, "viz_rating_vs_votes.html")
+```
+
+```{python}
+#| label: plotly-decade-animation
+top = features_df["primary_genre"].value_counts().head(6).index.tolist()
+sub = features_df[features_df["primary_genre"].isin(top)
+                  & features_df["decade"].notna()
+                  & (features_df["decade"] >= 1970)].copy()
+sub["decade"] = sub["decade"].astype(int).astype(str)
+decades = sorted(sub["decade"].unique())
+
+fig = px.scatter(
+    sub, x="log_vote_count", y="vote_average",
+    color="primary_genre", size="popularity", size_max=35,
+    animation_frame="decade",
+    hover_name="title",
+    hover_data={"primary_genre": False, "decade": True,
+                "vote_count": True, "popularity": ":.1f"},
+    category_orders={"primary_genre": top, "decade": decades},
+    color_discrete_sequence=PALETTE,
+    range_x=[1.3, 5.0], range_y=[2, 9.5],
+    title="Films by decade — bubble size = popularity",
+    labels={"log_vote_count": "log10(vote count)",
+            "vote_average": "Vote average"},
+)
+fig.update_layout(
+    margin=dict(l=60, r=30, t=80, b=100),
+    legend=dict(orientation="h", y=-0.15, x=0.5, xanchor="center"),
+)
+fig.layout.updatemenus[0].buttons[0].args[1]["frame"]["duration"] = 1200
+fig.layout.updatemenus[0].buttons[0].args[1]["transition"]["duration"] = 600
+fig.layout.sliders[0]["transition"]["duration"] = 600
+_save_html(fig, "viz_decade_animation.html")
+```
+
+```{python}
+#| label: plotly-3d-money
+top = features_df["primary_genre"].value_counts().head(6).index.tolist()
+sub = features_df.dropna(subset=["log_budget", "log_revenue"])
+sub = sub[sub["primary_genre"].isin(top)]
+fig = px.scatter_3d(
+    sub, x="log_budget", y="log_revenue", z="vote_average",
+    color="primary_genre", color_discrete_sequence=PALETTE,
+    hover_name="title",
+    hover_data={"release_year": True, "primary_genre": False},
+    title="Budget × Revenue × Rating (3D, drag to rotate)",
+    labels={"log_budget": "log10(budget USD)",
+            "log_revenue": "log10(revenue USD)",
+            "vote_average": "Vote average"},
+)
+fig.update_traces(marker=dict(size=4, opacity=0.78,
+                              line=dict(width=0.3, color="white")))
+fig.update_layout(margin=dict(l=0, r=0, t=60, b=0),
+                  scene=dict(camera=dict(eye=dict(x=1.3, y=1.3, z=1.0))))
+_save_html(fig, "viz_3d_money.html")
+```
+
+```{python}
+#| label: plotly-sunburst
+top = features_df["primary_genre"].value_counts().head(8).index.tolist()
+sub = features_df[features_df["decade"].notna() & (features_df["decade"] >= 1970)
+                  & features_df["primary_genre"].isin(top)].copy()
+sub["decade_label"] = sub["decade"].astype(int).astype(str) + "s"
+
+grouped = sub.groupby(["decade_label", "primary_genre"]).agg(
+    count=("movie_id", "size"),
+    mean_rating=("vote_average", "mean")).reset_index()
+
+fig = px.sunburst(
+    grouped, path=["decade_label", "primary_genre"],
+    values="count", color="mean_rating",
+    color_continuous_scale="Viridis", range_color=[5.5, 7.5],
+    title="Films by decade and primary genre (size = count, colour = mean rating)",
+)
+fig.update_traces(hovertemplate="<b>%{label}</b><br>films: %{value}<br>"
+                                "mean rating: %{color:.2f}<extra></extra>")
+fig.update_layout(margin=dict(l=10, r=10, t=70, b=10))
+_save_html(fig, "viz_sunburst.html")
+```
+
+```{python}
+#| label: plotly-genre-box
+top = features_df["primary_genre"].value_counts().head(8).index.tolist()
+sub = features_df[features_df["primary_genre"].isin(top)].copy()
+order = (sub.groupby("primary_genre")["vote_average"].median()
+            .sort_values(ascending=False).index.tolist())
+
+fig = go.Figure()
+for g, color in zip(order, PALETTE):
+    s = sub[sub["primary_genre"] == g]
+    fig.add_trace(go.Violin(
+        y=s["vote_average"], name=g, box=dict(visible=True),
+        meanline=dict(visible=True), points="outliers",
+        fillcolor=color, line=dict(color=color, width=1.2), opacity=0.55,
+        hovertemplate=f"<b>{g}</b><br>rating: %{{y:.2f}}<extra></extra>",
+    ))
+fig.update_layout(
+    title="Rating distributions by primary genre",
+    yaxis=dict(title="Vote average", range=[2, 9.5]),
+    margin=dict(l=60, r=30, t=70, b=80),
+    showlegend=False,
+)
+_save_html(fig, "viz_genre_box.html")
+```
+
+```{python}
+#| label: plotly-feature-importance
+res = reg_results.get("xgboost") or reg_results["random_forest"]
+fi = res.feature_importance.head(20).iloc[::-1]
+fig = go.Figure(go.Bar(
+    x=fi["importance"], y=fi["feature"], orientation="h",
+    marker=dict(color=fi["importance"], colorscale="Viridis", showscale=False,
+                line=dict(color="white", width=0.5)),
+    hovertemplate="<b>%{y}</b><br>importance: %{x:.4f}<extra></extra>",
+))
+fig.update_layout(
+    title=f"Top 20 features ranked by importance ({res.name})",
+    xaxis_title="Relative importance", yaxis_title="",
+    margin=dict(l=190, r=30, t=60, b=50),
+)
+_save_html(fig, "viz_feature_importance.html")
+```
+
+```{python}
+#| label: plotly-pred-vs-actual
+rows = []
+for _, res in reg_results.items():
+    d = res.test_predictions.copy()
+    d["model"] = res.name
+    rows.append(d)
+df_pa = pd.concat(rows, ignore_index=True)
+fig = px.scatter(
+    df_pa, x="y_true", y="y_pred", facet_col="model",
+    opacity=0.55, title="Predicted vs actual ratings on the test set",
+    labels={"y_true": "Actual", "y_pred": "Predicted"},
+    color_discrete_sequence=PALETTE,
+)
+lim_lo = float(df_pa["y_true"].min() - 0.2)
+lim_hi = float(df_pa["y_true"].max() + 0.2)
+for i in range(len(reg_results)):
+    fig.add_shape(type="line", x0=lim_lo, x1=lim_hi,
+                  y0=lim_lo, y1=lim_hi,
+                  line=dict(color="black", dash="dash"),
+                  row=1, col=i + 1)
+_save_html(fig, "viz_pred_vs_actual.html")
+```
+
+```{python}
+#| label: plotly-roc
+fig = go.Figure()
+for color, (_, res) in zip(PALETTE, clf_results.items()):
+    fpr, tpr, _ = roc_curve(res.test_y, res.test_proba)
+    auc = res.metrics["test"]["ROC_AUC"]
+    fig.add_trace(go.Scatter(
+        x=fpr, y=tpr, mode="lines", name=f"{res.name} (AUC = {auc:.2f})",
+        line=dict(color=color, width=2.5),
+        hovertemplate=f"{res.name}<br>FPR: %{{x:.2f}}<br>"
+                      f"TPR: %{{y:.2f}}<extra></extra>",
+    ))
+fig.add_trace(go.Scatter(x=[0, 1], y=[0, 1], mode="lines", name="Chance",
+                         line=dict(dash="dash", color="grey"),
+                         hoverinfo="skip"))
+fig.update_layout(
+    title="ROC curves — high-rating classifier (rating ≥ 7.0)",
+    xaxis=dict(title="False positive rate", range=[0, 1]),
+    yaxis=dict(title="True positive rate", range=[0, 1]),
+    margin=dict(l=60, r=30, t=70, b=60),
+    legend=dict(x=0.55, y=0.05),
+)
+_save_html(fig, "viz_roc.html")
+print("Interactive figures saved to docs/.")
+```
+
+## Save metric tables for the report
+
+```{python}
+#| label: save-tables
+summary_main.to_csv(TABLES_DIR / "table1_main_summary.csv")
+summary_fin.to_csv(TABLES_DIR  / "table2_financial_summary.csv")
+reg_metrics_test.to_csv(TABLES_DIR / "table3_regression.csv")
+clf_metrics.to_csv(TABLES_DIR / "table4_classification.csv")
+(reg_results.get("xgboost") or reg_results["random_forest"]).feature_importance \
+    .head(20).to_csv(TABLES_DIR / "table5_feature_importance.csv", index=False)
+print("Tables saved to", TABLES_DIR)
+```
+
+## Conclusions (full discussion in the report)
+
+The PDF report (`report/report.pdf`) has the full narrative. Headline points:
+
+* The strongest predictors are genre indicators (`genre_animation`,
+  `genre_drama`, `genre_music`) plus `is_english` and `release_year`.
+  Engagement features (`log_vote_count`, `log_popularity`) sit in the
+  middle of the ranking on the full 1,500-film sample.
+* XGBoost and Random Forest both substantially outperform the linear
+  baseline, with XGBoost marginally ahead on RMSE and accuracy and
+  Random Forest marginally ahead on ROC AUC.
+* The high-rating classifier (rating ≥ 7.0) reaches ROC AUC near 0.87,
+  well above chance.

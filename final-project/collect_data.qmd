@@ -1,0 +1,188 @@
+---
+title: "Collect Movie Metadata from TMDb"
+subtitle: "JSC370 Final Project, Winter 2026"
+author: "Yujun Lu"
+format:
+  html:
+    toc: true
+    code-fold: show
+    embed-resources: false
+    theme: cosmo
+execute:
+  warning: false
+  message: false
+  echo: true
+  eval: false
+---
+
+This notebook gathers about 1,500 unique movies from the TMDb public REST
+API and saves them to `data/movies_raw.csv`. Run this once before
+`analysis.qmd`. Re-running it overwrites the CSV.
+
+The default `TMDB_API_KEY` below is the one from my midterm. To use a
+different key, set the `TMDB_API_KEY` environment variable in your
+shell before running:
+
+``` bash
+export TMDB_API_KEY=your_key_here
+quarto render collect_data.qmd
+```
+
+The notebook is set to `eval: false` so a render of the project does not
+re-hit the API. Set `eval: true` (or run the cells interactively) to
+actually collect the data.
+
+## Setup
+
+```{python}
+#| label: setup
+from __future__ import annotations
+
+import os
+import time
+import json
+from pathlib import Path
+
+import requests
+import pandas as pd
+
+API_KEY = os.environ.get("TMDB_API_KEY", "939ed19c3d5487d60bf45c0c8e353499")
+BASE_URL = "https://api.themoviedb.org/3"
+TARGET_UNIQUE_MOVIES = 1500
+SLEEP_SEC = 0.20
+TIMEOUT = 30
+PAGES_PER_STRATEGY = 30
+
+DATA_DIR = Path.cwd() / "data"
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+```
+
+## Sampling strategies
+
+The midterm used `/movie/popular`, which returned the same trending
+titles on every call and produced only 148 usable rows. For the final I
+switched to `/discover/movie` and combined five sort strategies to widen
+the sample.
+
+```{python}
+#| label: strategies
+STRATEGIES = [
+    ("popular_recent",
+     {"sort_by": "popularity.desc", "vote_count.gte": 50,
+      "primary_release_date.gte": "2015-01-01"}),
+    ("popular_classic",
+     {"sort_by": "popularity.desc", "vote_count.gte": 200,
+      "primary_release_date.lte": "2014-12-31"}),
+    ("most_voted",
+     {"sort_by": "vote_count.desc", "vote_count.gte": 500}),
+    ("top_rated",
+     {"sort_by": "vote_average.desc", "vote_count.gte": 1000}),
+    ("revenue_top",
+     {"sort_by": "revenue.desc", "vote_count.gte": 100}),
+]
+```
+
+## Collect movie IDs
+
+```{python}
+#| label: fetch-ids
+def fetch_movie_ids():
+    seen = set()
+    ids = []
+    for label, base_params in STRATEGIES:
+        print(f"\n[{label}]")
+        for page in range(1, PAGES_PER_STRATEGY + 1):
+            params = {"api_key": API_KEY, "page": page, "language": "en-US",
+                      "include_adult": "false"}
+            params.update(base_params)
+            try:
+                r = requests.get(f"{BASE_URL}/discover/movie",
+                                 params=params, timeout=TIMEOUT)
+                if r.status_code != 200:
+                    print(f"  page {page}: HTTP {r.status_code}")
+                    break
+                results = r.json().get("results", [])
+                if not results:
+                    break
+                for m in results:
+                    mid = m.get("id")
+                    if mid and mid not in seen:
+                        seen.add(mid)
+                        ids.append(mid)
+                if page % 10 == 0:
+                    print(f"  page {page}: total unique = {len(seen)}")
+                time.sleep(SLEEP_SEC)
+                if len(seen) >= TARGET_UNIQUE_MOVIES:
+                    return ids
+            except requests.RequestException as e:
+                print(f"  page {page} error: {e}")
+                time.sleep(1.0)
+    return ids
+
+
+ids = fetch_movie_ids()
+print(f"\n{len(ids)} unique IDs collected.")
+```
+
+## Fetch per-movie details
+
+```{python}
+#| label: fetch-details
+def fetch_movie_details(movie_ids):
+    rows = []
+    for i, mid in enumerate(movie_ids, start=1):
+        try:
+            r = requests.get(f"{BASE_URL}/movie/{mid}",
+                             params={"api_key": API_KEY, "language": "en-US"},
+                             timeout=TIMEOUT)
+            if r.status_code != 200:
+                continue
+            d = r.json()
+            rows.append({
+                "movie_id": d.get("id"),
+                "title": d.get("title"),
+                "original_language": d.get("original_language"),
+                "release_date": d.get("release_date"),
+                "popularity": d.get("popularity"),
+                "vote_average": d.get("vote_average"),
+                "vote_count": d.get("vote_count"),
+                "budget": d.get("budget"),
+                "revenue": d.get("revenue"),
+                "runtime": d.get("runtime"),
+                "status": d.get("status"),
+                "adult": d.get("adult"),
+                "belongs_to_collection": int(d.get("belongs_to_collection") is not None),
+                "genres": json.dumps([g.get("name") for g in (d.get("genres") or [])]),
+                "production_countries": json.dumps(
+                    [c.get("iso_3166_1") for c in (d.get("production_countries") or [])]),
+                "production_companies_n": len(d.get("production_companies") or []),
+                "spoken_languages_n": len(d.get("spoken_languages") or []),
+                "tagline_len": len(d.get("tagline") or ""),
+                "overview_len": len(d.get("overview") or ""),
+            })
+        except requests.RequestException as e:
+            print(f"  detail fetch failed for id={mid}: {e}")
+        if i % 50 == 0:
+            print(f"  fetched details {i}/{len(movie_ids)}")
+        time.sleep(SLEEP_SEC)
+    return rows
+
+
+rows = fetch_movie_details(ids)
+df = pd.DataFrame(rows).drop_duplicates(subset=["movie_id"])
+out_path = DATA_DIR / "movies_raw.csv"
+df.to_csv(out_path, index=False)
+print(f"\nSaved {len(df)} rows to {out_path}")
+```
+
+## What's in the saved CSV
+
+The columns are: `movie_id`, `title`, `original_language`,
+`release_date`, `popularity`, `vote_average`, `vote_count`, `budget`,
+`revenue`, `runtime`, `status`, `adult`, `belongs_to_collection`,
+`genres` (JSON list), `production_countries` (JSON list),
+`production_companies_n`, `spoken_languages_n`, `tagline_len`,
+`overview_len`.
+
+`analysis.qmd` reads this CSV directly, so once it is saved you do not
+need to re-run this notebook unless you want fresh data.

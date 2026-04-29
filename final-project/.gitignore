@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.DS_Store
+data/movies_raw_synthetic.csv
+report/report.tex
+report/report_files/
+.quarto/

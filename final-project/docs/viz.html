@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Interactive figures — JSC370 Final Project</title>
+<style>
+  :root { --accent: #2c5282; --accent-soft: #ebf3fb; --text: #1a202c; --muted: #4a5568; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial,
+                 "PingFang SC", "Microsoft YaHei", sans-serif;
+    color: var(--text); background: #fdfdfd; line-height: 1.65;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 40px 20px; }
+  header { border-bottom: 1px solid #e2e8f0; padding-bottom: 18px; margin-bottom: 24px; }
+  h1 { font-size: 1.85rem; margin: 0 0 4px; color: var(--accent); }
+  .subtitle { color: var(--muted); font-size: 0.95rem; margin: 0; }
+  nav a {
+    display: inline-block; margin-right: 12px;
+    padding: 6px 14px; background: var(--accent-soft);
+    color: var(--accent); text-decoration: none; border-radius: 4px;
+    font-size: 0.9rem;
+  }
+  nav a:hover { background: var(--accent); color: white; }
+  .toc { background: white; border: 1px solid #e2e8f0; border-radius: 6px;
+         padding: 14px 20px; margin: 14px 0 28px; }
+  .toc h3 { margin: 0 0 8px; font-size: 0.95rem; color: var(--accent); }
+  .toc a { color: var(--text); text-decoration: none; font-size: 0.92rem; }
+  .toc a:hover { color: var(--accent); text-decoration: underline; }
+  .toc ol { margin: 0; padding-left: 22px; }
+  h2 { color: var(--accent); margin-top: 36px; padding-bottom: 6px;
+       border-bottom: 2px solid var(--accent-soft); scroll-margin-top: 16px; }
+  .figure {
+    background: white; border: 1px solid #e2e8f0; border-radius: 6px;
+    padding: 14px 16px; margin: 18px 0 28px;
+  }
+  .figure iframe {
+    width: 100%; height: 540px; border: none;
+  }
+  .figure.tall iframe { height: 620px; }
+  .caption { font-size: 0.94rem; color: var(--muted); padding: 10px 4px 0;
+             border-top: 1px solid #f0f4f8; margin-top: 10px; }
+  .caption strong { color: var(--text); }
+  .section-tag {
+    display: inline-block; font-size: 0.75rem; font-weight: 600;
+    letter-spacing: 0.06em; text-transform: uppercase;
+    padding: 3px 10px; border-radius: 12px; margin-left: 8px;
+    vertical-align: middle;
+  }
+  .section-tag.main { background: #2c5282; color: white; }
+  .section-tag.extra { background: #e2e8f0; color: #4a5568; }
+  .section-divider {
+    margin-top: 50px; padding: 18px 22px;
+    background: linear-gradient(to right, var(--accent-soft), white);
+    border-left: 4px solid var(--accent); border-radius: 4px;
+  }
+  .section-divider h2 { border: none; margin: 0 0 4px; padding: 0; }
+  .section-divider p { margin: 0; color: var(--muted); font-size: 0.92rem; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+         background: #f1f5f9; padding: 1px 5px; border-radius: 3px;
+         font-size: 0.92em; color: #334155; }
+  footer { margin-top: 48px; padding-top: 16px; border-top: 1px solid #e2e8f0;
+           color: var(--muted); font-size: 0.9rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>Interactive figures</h1>
+  <p class="subtitle">Predicting Audience Movie Ratings from TMDb Metadata · JSC370 Final Project</p>
+  <nav style="margin-top:14px;">
+    <a href="index.html">← Project home</a>
+    <a href="report.pdf">Download report (PDF)</a>
+    <a href="https://github.com/Alice2288/JSC370---2026Winter" target="_blank" rel="noopener">GitHub repo</a>
+  </nav>
+</header>
+
+<p>
+  Figures below are built with <a href="https://plotly.com/python/" target="_blank">Plotly</a>.
+  Hover for film-level details, click legend entries to toggle traces, drag
+  on 3D plots to rotate. Most figures also expose extra controls (dropdowns,
+  play/pause, sliders) that filter or animate the view. The first three are
+  the headline interactive visualisations submitted for HW5; the remaining
+  five are supplementary diagnostics referenced in the report.
+</p>
+
+<div class="toc">
+  <h3>Figures on this page</h3>
+  <ol>
+    <li><a href="#fig1">Engagement and ratings (genre filter)</a> <span class="section-tag main">HW5</span></li>
+    <li><a href="#fig2">Films by decade — animated bubble chart</a> <span class="section-tag main">HW5</span></li>
+    <li><a href="#fig3">Budget × revenue × rating in 3D</a> <span class="section-tag main">HW5</span></li>
+    <li><a href="#fig4">ROC curves — high-rating classifier</a> <span class="section-tag extra">extra</span></li>
+    <li><a href="#fig5">Decade and genre composition (sunburst)</a> <span class="section-tag extra">extra</span></li>
+    <li><a href="#fig6">Rating distributions by genre (violin)</a> <span class="section-tag extra">extra</span></li>
+    <li><a href="#fig7">Top features driving predicted rating</a> <span class="section-tag extra">extra</span></li>
+    <li><a href="#fig8">Predicted vs actual ratings (3 models)</a> <span class="section-tag extra">extra</span></li>
+  </ol>
+</div>
+
+<div class="section-divider">
+  <h2>Headline figures (HW5)</h2>
+  <p>Three interactive visualisations covering dropdown filtering, time-axis animation, and 3D rotation.</p>
+</div>
+
+<h2 id="fig1">1. Engagement and ratings</h2>
+<div class="figure">
+  <iframe src="viz_rating_vs_votes.html" loading="lazy"></iframe>
+  <p class="caption"><strong>Figure 1.</strong>
+     Vote average vs <code>log10(vote count)</code>. Use the dropdown at
+     the top-left to filter by primary genre, or keep "All genres" to
+     compare across the eight most common ones. Films with more votes
+     cluster in a narrower rating band, which is the empirical version of
+     the idea that big audiences stabilise the average rating.</p>
+</div>
+
+<h2 id="fig2">2. Films by decade — animated bubble chart</h2>
+<div class="figure tall">
+  <iframe src="viz_decade_animation.html" loading="lazy"></iframe>
+  <p class="caption"><strong>Figure 2.</strong>
+     Each frame shows the films released in one decade, sized by
+     popularity and coloured by primary genre. Click <em>Play</em> or drag
+     the slider to step through time. Newer decades carry more films and
+     a wider tail of vote counts; the rating distribution itself stays
+     fairly stable, suggesting most of the change in TMDb's catalogue is
+     in <em>volume</em> and <em>visibility</em> rather than in audience
+     taste.</p>
+</div>
+
+<h2 id="fig3">3. Budget × revenue × rating in 3D</h2>
+<div class="figure tall">
+  <iframe src="viz_3d_money.html" loading="lazy"></iframe>
+  <p class="caption"><strong>Figure 3.</strong>
+     Drag inside the plot to rotate the camera. Each axis is one
+     log-scale variable: budget, revenue, and rating. The diagonal sheet
+     of points is the standard
+     more-budget-makes-more-revenue relationship; what the third
+     dimension shows is that <em>rating</em> doesn't lie along that
+     axis. High-rated and low-rated films can sit side-by-side at the
+     same budget and revenue level.</p>
+</div>
+
+<div class="section-divider">
+  <h2>Supplementary figures</h2>
+  <p>Additional diagnostics referenced in the report.</p>
+</div>
+
+<h2 id="fig4">4. ROC curves — high-rating classifier</h2>
+<div class="figure">
+  <iframe src="viz_roc.html" loading="lazy"></iframe>
+  <p class="caption"><strong>Figure 4.</strong>
+     ROC curves for the binary task of identifying films with
+     <code>vote_average ≥ 7.0</code>. Each curve traces the
+     true-positive rate against the false-positive rate as the decision
+     threshold moves; the dashed grey line is chance. The Random Forest
+     and XGBoost curves are essentially tied (AUC ≈ 0.87), both well
+     above the logistic baseline. AUC values are in the legend.</p>
+</div>
+
+<h2 id="fig5">5. Decade and genre composition</h2>
+<div class="figure">
+  <iframe src="viz_sunburst.html" loading="lazy"></iframe>
+  <p class="caption"><strong>Figure 5.</strong>
+     Sunburst chart with decade on the inner ring and primary genre on
+     the outer ring. Slice size is the number of films and slice colour
+     is the mean rating in that bucket. Click any slice to zoom in;
+     click the centre to zoom out. Documentaries and animation reliably
+     sit on the higher-rating end of the colour scale across decades;
+     horror sits on the lower end.</p>
+</div>
+
+<h2 id="fig6">6. Rating distributions by genre</h2>
+<div class="figure">
+  <iframe src="viz_genre_box.html" loading="lazy"></iframe>
+  <p class="caption"><strong>Figure 6.</strong>
+     Violin + box plot of vote averages, broken out by primary genre.
+     Hover any violin to see its quartiles. Median ratings differ
+     across genres but the within-genre spread is wide and overlaps a
+     lot, which is why genre alone is a weak predictor of rating in
+     the regression model.</p>
+</div>
+
+<h2 id="fig7">7. Top features driving predicted rating</h2>
+<div class="figure">
+  <iframe src="viz_feature_importance.html" loading="lazy"></iframe>
+  <p class="caption"><strong>Figure 7.</strong>
+     Top 20 features ranked by relative importance in the XGBoost
+     regression model. Genre indicators (<code>genre_animation</code>,
+     <code>genre_drama</code>, <code>genre_music</code>) lead the
+     ranking, followed by <code>is_english</code> and
+     <code>release_year</code>. Engagement variables
+     (<code>log_vote_count</code>, <code>log_popularity</code>) sit
+     in the middle of the ranking — informative but not dominant on
+     this 1,500-film sample.</p>
+</div>
+
+<h2 id="fig8">8. Predicted vs actual ratings</h2>
+<div class="figure">
+  <iframe src="viz_pred_vs_actual.html" loading="lazy"></iframe>
+  <p class="caption"><strong>Figure 8.</strong>
+     Predicted vs actual ratings on the held-out test set, faceted by
+     model. The dashed line is perfect prediction. Linear regression
+     visibly shrinks predictions toward the mean. Random Forest does
+     better. XGBoost has the tightest scatter and the lowest RMSE. All
+     three models slightly underpredict the very top of the rating
+     scale, which is hard to fit with so few training examples up
+     there.</p>
+</div>
+
+<footer>
+  <p>JSC370, University of Toronto, Winter 2026.
+     Source: <a href="https://github.com/Alice2288/JSC370---2026Winter">GitHub</a>.
+     Data: <a href="https://www.themoviedb.org/">The Movie Database</a>.</p>
+</footer>
+
+</div>
+</body>
+</html>
