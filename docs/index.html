@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Predicting Movie Ratings — JSC370 Final Project</title>
+<style>
+  :root {
+    --accent: #2c5282;
+    --accent-soft: #ebf3fb;
+    --text: #1a202c;
+    --muted: #4a5568;
+    --bg: #fdfdfd;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial,
+                 "Noto Sans", "PingFang SC", "Hiragino Sans GB",
+                 "Microsoft YaHei", sans-serif;
+    color: var(--text);
+    background: var(--bg);
+    line-height: 1.65;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; padding: 48px 24px; }
+  header { border-bottom: 1px solid #e2e8f0; padding-bottom: 24px; margin-bottom: 32px; }
+  h1 { font-size: 2.1rem; margin: 0 0 6px; color: var(--accent); }
+  .subtitle { color: var(--muted); font-size: 1rem; margin: 0; }
+  h2 { color: var(--accent); margin-top: 40px; border-bottom: 2px solid var(--accent-soft); padding-bottom: 6px; }
+  h3 { margin-top: 28px; }
+  nav { margin: 16px 0 0; }
+  nav a {
+    display: inline-block; margin-right: 14px;
+    padding: 6px 14px; background: var(--accent-soft);
+    color: var(--accent); text-decoration: none; border-radius: 4px;
+    font-size: 0.92rem;
+  }
+  nav a:hover { background: var(--accent); color: white; }
+  .pill {
+    display: inline-block; padding: 2px 10px; border-radius: 12px;
+    background: var(--accent-soft); color: var(--accent);
+    font-size: 0.85rem; margin-right: 8px;
+  }
+  .card {
+    background: white; border: 1px solid #e2e8f0; border-radius: 6px;
+    padding: 18px 22px; margin: 18px 0;
+  }
+  code, pre { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; }
+  :not(pre) > code { background: #f1f5f9; padding: 2px 6px; border-radius: 3px; font-size: 0.92em; color: #334155; }
+  pre { background: #0f172a; color: #e2e8f0; padding: 14px 18px; overflow-x: auto; border-radius: 6px; font-size: 0.9rem; line-height: 1.55; }
+  pre code { background: transparent; color: inherit; padding: 0; font-size: inherit; }
+  ul { padding-left: 22px; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; }
+  th, td { padding: 8px 12px; border-bottom: 1px solid #e2e8f0; text-align: left; }
+  th { background: var(--accent-soft); }
+  footer { margin-top: 56px; padding-top: 16px; border-top: 1px solid #e2e8f0;
+           color: var(--muted); font-size: 0.9rem; }
+  .download {
+    display: inline-block; padding: 10px 20px; background: var(--accent);
+    color: white !important; text-decoration: none; border-radius: 4px;
+    font-weight: 500; margin: 6px 6px 6px 0;
+  }
+  .download:hover { background: #1e3a8a; }
+  .download.secondary { background: white; color: var(--accent) !important;
+                        border: 1.5px solid var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>Predicting Audience Movie Ratings from TMDb Metadata</h1>
+  <p class="subtitle">JSC370 Final Project &middot; Winter 2026 &middot; Yujun Lu</p>
+  <nav>
+    <a href="index.html">Home</a>
+    <a href="viz.html">Interactive figures</a>
+    <a href="report.pdf">Download report (PDF)</a>
+    <a href="https://github.com/Alice2288/JSC370---2026Winter" target="_blank" rel="noopener">GitHub repo</a>
+  </nav>
+</header>
+
+<section>
+  <h2>What this project is about</h2>
+  <p>
+    This project asks a simple question: can you predict how audiences
+    will rate a movie just from its public metadata? Things like runtime,
+    genre, release year, language, and a couple of engagement signals
+    (vote count, popularity).
+  </p>
+  <p>
+    My midterm did exploratory analysis on 148 films from
+    <a href="https://www.themoviedb.org/" target="_blank" rel="noopener">The
+    Movie Database</a> (TMDb) and found that no single variable explains
+    ratings well on its own. Popularity barely correlates with rating.
+    Budget and revenue track each other but not rating. Genres pull
+    medians around a bit, but the spread within each genre is huge. So
+    if no individual variable does the job, can a model that uses all of
+    them at once?
+  </p>
+  <p>
+    For the final I scaled the dataset up to about 1,500 films and ran
+    two prediction tasks:
+  </p>
+  <ul>
+    <li><strong>Regression.</strong> Predict the continuous TMDb
+        <code>vote_average</code> from movie metadata.</li>
+    <li><strong>Classification.</strong> Predict whether a film is
+        <em>high-rated</em> (rating at least 7.0).</li>
+  </ul>
+  <p>
+    Three models for each task: a linear baseline, Random Forest, and
+    XGBoost. Standard 60/20/20 train/validation/test split.
+  </p>
+
+  <p>
+    <a class="download" href="report.pdf">Download the full report (PDF)</a>
+    <a class="download secondary" href="viz.html">Explore interactive figures</a>
+  </p>
+</section>
+
+<section>
+  <h2>Data and methods at a glance</h2>
+  <div class="card">
+    <p><span class="pill">Source</span>
+       <a href="https://developer.themoviedb.org/reference/intro/getting-started" target="_blank" rel="noopener">
+         TMDb REST API</a>. I used <code>/discover/movie</code> across five
+       sort strategies (recent popular, classic popular, most-voted, top-rated,
+       highest grossing) and then <code>/movie/{id}</code> for the per-film
+       details.</p>
+    <p><span class="pill">Sample</span> About 1,500 unique films after
+       deduplication and a <code>vote_count ≥ 30</code> noise filter.</p>
+    <p><span class="pill">Features</span> Engagement (log vote count and
+       log popularity), production characteristics (runtime, release year,
+       budget and revenue when reported, country, language, company count),
+       plus 18 binary genre indicators.</p>
+    <p><span class="pill">Models</span> Linear/Logistic regression as
+       baselines, Random Forest, XGBoost. <code>random_state = 370</code>
+       so anyone running the code gets the same numbers.</p>
+    <p><span class="pill">Metrics</span> Regression: R², RMSE, MAE.
+       Classification: accuracy and ROC AUC.</p>
+  </div>
+</section>
+
+<section>
+  <h2>Main findings</h2>
+  <ul>
+    <li>Both Random Forest and XGBoost beat the linear baseline by a clear
+        margin on the test set. The two tree models are roughly tied:
+        XGBoost is marginally ahead on RMSE and accuracy, Random Forest
+        is marginally ahead on ROC AUC.</li>
+    <li>The strongest predictors are genre indicators
+        (<code>genre_animation</code>, <code>genre_drama</code>,
+        <code>genre_music</code>) together with <code>is_english</code>
+        and <code>release_year</code>. The model leans on the systematic
+        rating differences across genres and languages more than on any
+        single engagement signal.</li>
+    <li>Engagement features (<code>log_vote_count</code>,
+        <code>log_popularity</code>) still contribute, but they sit
+        in the middle of the importance ranking rather than at the top —
+        a different story from the smaller 148-film midterm sample,
+        where engagement looked dominant.</li>
+    <li>The high-rating classifier (rating ≥ 7.0) reaches ROC AUC near
+        0.87, with Random Forest and XGBoost essentially tied.</li>
+  </ul>
+  <p>
+    The <a href="report.pdf">PDF report</a> has the full tables and
+    discussion. Use <a href="viz.html">the interactive figures</a> to
+    drill into individual films.
+  </p>
+</section>
+
+<section>
+  <h2>How to reproduce everything</h2>
+  <p>From the <code>final-project/</code> directory:</p>
+<pre><code># 1. install dependencies
+pip install -r requirements.txt
+
+# 2. collect movie metadata (about 5 minutes, polite rate-limited)
+quarto render collect_data.qmd
+
+# 3. run the analysis end-to-end (cleans, models, builds all figures)
+quarto render analysis.qmd
+
+# 4. (optional) rebuild the PDF
+quarto render report/report.qmd</code></pre>
+  <p>
+    The <code>data/</code> folder holds the saved CSV.
+    <code>figures/</code> has the static PNGs the report uses.
+    <code>docs/</code> has this website plus the standalone interactive
+    plotly HTML files.
+  </p>
+</section>
+
+<section>
+  <h2>Presentation</h2>
+  <p>The 5-minute video walkthrough is on Quercus
+     (and linked from the GitHub repo). The script I read from is in
+     <code>PRESENTATION_SCRIPT.md</code> in the repo if you want to follow
+     along.</p>
+</section>
+
+<footer>
+  <p>JSC370, University of Toronto, Winter 2026.
+     Source: <a href="https://github.com/Alice2288/JSC370---2026Winter">GitHub</a>.
+     Data: <a href="https://www.themoviedb.org/">The Movie Database</a>.</p>
+</footer>
+
+</div>
+</body>
+</html>
